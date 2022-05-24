@@ -73,8 +73,12 @@ defmodule Yavascript.SpiderMonkeyEngine do
       &default_thread_opts);
 
     if (tcreate == 0) {
-      var abc = __resource__.create(threadinfo_ptr_t, env, thread_info);
-      return abc;
+      var res = __resource__.create(threadinfo_ptr_t, env, thread_info)
+        catch unreachable;
+
+      __resource__.release(threadinfo_ptr_t, env, res);
+
+      return res;
     } else {
       // TODO: actually raise here.
       return beam.make_atom(env, "error");
@@ -108,11 +112,11 @@ defmodule Yavascript.SpiderMonkeyEngine do
 
     _ = beam.send_advanced(null, thread_info.pid, env, beam.make_atom(env, "unlock"));
 
-    while (true) loop: {
+    while (true) {
       if (e.enif_mutex_trylock(mutex) == 0) {
         defer e.enif_mutex_unlock(mutex);
 
-        if (!thread_info.active) break :loop;
+        if (!thread_info.active) { return null; }
 
         // check to make sure this_ref is different from the last ref.
         if (thread_info.called) {
@@ -136,11 +140,9 @@ defmodule Yavascript.SpiderMonkeyEngine do
           thread_info.called = false;
         }
       }
-      // 100 us sleep time till next poll
-      std.time.sleep(100_000);
+      // 1 ms sleep time till next poll
+      std.time.sleep(1_000_000);
     }
-
-    return null;
   }
 
   fn responseFn(resp_text: [*c] const u8, response_opaque: ?*anyopaque) void {
@@ -178,27 +180,32 @@ defmodule Yavascript.SpiderMonkeyEngine do
 
   def create_context do
     result = create_thread()
-    receive do :unlock -> result end
+
+    receive do
+      :unlock -> result
+    end
   end
 
   def run_script(context, code, needs_return) do
     Yavascript.SpiderMonkeyEngine.execute(context, code, needs_return)
+
     receive do
       {:js_result, result} when needs_return -> Jason.decode!(result)
-      :js_ok when not needs_return -> :ok
+      :js_ok when not needs_return -> context
     end
   end
 
-  @spec build_function({atom, non_neg_integer}) :: Macro.t
-  def build_function({fun, arity}) do
-    args = case arity do
-      0 -> []
-      n -> for i <- 1..n, do: {:"arg#{i}", [], Elixir}
-    end
+  @spec _build_function({atom, non_neg_integer}) :: Macro.t()
+  def _build_function({fun, arity}) do
+    args =
+      case arity do
+        0 -> []
+        n -> for i <- 1..n, do: {:"arg#{i}", [], Elixir}
+      end
 
     quote do
       def unquote(fun)(unquote_splicing(args)) do
-        context = Process.get(:context) || raise "no context!"
+        context = Process.get(:js_context) || raise "no context!"
 
         arguments = Jason.encode!(unquote(args))
         code = "JSON.stringify(#{unquote(fun)}(...JSON.parse('#{arguments}')))"
